@@ -2874,6 +2874,40 @@ enum NotchAgentTests {
             ("2026-09-23T14:20:00Z", "o", ["fh": 6, "sd": 42])])) ?? []
         suite.expect(AgentClaudeAppUsage.limits(from: renewed, now: now)?.windows.last?.resetsAt == at("2026-09-23T20:00:00Z"),
                      "a week renews seven days after the last drop, on the hour, counting only the same account")
+        let weeks: [(String, String?, [String: Any])] = [
+            ("2026-09-19T11:56:00Z", "o", ["sd": 100]), ("2026-09-19T12:01:00Z", "o", ["sd": 0]),
+            ("2026-09-26T11:56:00Z", "o", ["sd": 100]), ("2026-09-26T12:01:00Z", "o", ["sd": 0]),
+            ("2026-10-01T08:48:00Z", "o", ["sd": 100]), ("2026-10-01T08:53:00Z", "o", ["sd": 0]),
+            ("2026-10-01T10:00:00Z", "o", ["fh": 5, "sd": 4])]
+        let banked = AgentClaudeAppUsage.samples(from: history(weeks)) ?? []
+        suite.expect(AgentClaudeAppUsage.limits(from: banked, now: at("2026-10-01T10:05:00Z"))?.windows.last?.resetsAt
+                        == at("2026-10-03T12:00:00Z"),
+                     "a reset used mid-week empties the week without moving its renewal")
+        // Drops whose spans only touch at a reading do not share a moment.
+        let touching = AgentClaudeAppUsage.samples(from: history([
+            ("2026-09-19T11:55:00Z", "o", ["sd": 100]), ("2026-09-19T12:00:00Z", "o", ["sd": 0]),
+            ("2026-09-26T12:00:00Z", "o", ["sd": 100]), ("2026-09-26T12:05:00Z", "o", ["sd": 0]),
+            ("2026-10-01T08:48:00Z", "o", ["sd": 100]), ("2026-10-01T08:53:00Z", "o", ["sd": 0]),
+            ("2026-10-01T10:00:00Z", "o", ["fh": 5, "sd": 4])])) ?? []
+        suite.expect(AgentClaudeAppUsage.limits(from: touching, now: at("2026-10-01T10:05:00Z"))?.windows.last?.resetsAt
+                        == at("2026-10-08T08:53:00Z"),
+                     "drops whose spans only touch at a reading confirm no schedule, so the last drop stands")
+        let wideConfirmed = AgentClaudeAppUsage.samples(from: history([
+            ("2026-09-19T11:56:00Z", "o", ["sd": 100]), ("2026-09-19T12:01:00Z", "o", ["sd": 0]),
+            ("2026-09-26T01:00:00Z", "o", ["sd": 100]), ("2026-09-26T13:00:00Z", "o", ["sd": 0]),
+            ("2026-10-01T08:48:00Z", "o", ["sd": 100]), ("2026-10-01T08:53:00Z", "o", ["sd": 0]),
+            ("2026-10-01T10:00:00Z", "o", ["fh": 5, "sd": 4])])) ?? []
+        suite.expect(AgentClaudeAppUsage.limits(from: wideConfirmed, now: at("2026-10-01T10:05:00Z"))?.windows.last?.resetsAt
+                        == at("2026-10-03T12:00:00Z"),
+                     "a confirmed drop renews inside what its confirming drops allow, not at the start of its own span")
+        let afterDays = AgentClaudeAppUsage.samples(from: history([
+            ("2026-09-19T11:56:00Z", "o", ["sd": 100]), ("2026-09-19T12:01:00Z", "o", ["sd": 0]),
+            ("2026-09-26T11:56:00Z", "o", ["sd": 100]), ("2026-09-26T12:01:00Z", "o", ["sd": 0]),
+            ("2026-10-03T12:00:00Z", "o", ["sd": 100]), ("2026-10-04T13:00:00Z", "o", ["sd": 0]),
+            ("2026-10-04T14:00:00Z", "o", ["fh": 5, "sd": 4])])) ?? []
+        suite.expect(AgentClaudeAppUsage.limits(from: afterDays, now: at("2026-10-04T14:05:00Z"))?.windows.last?.resetsAt
+                        == at("2026-10-10T12:00:00Z"),
+                     "a drop read only after days without readings does not move a schedule two drops already confirm")
         let later = AgentClaudeAppUsage.limits(from: samples, now: at("2026-09-23T20:30:00Z"))
         suite.expect(later?.windows.map(\.kind) == [.weekly] && AgentClaudeAppUsage.limits(from: samples, now: at("2026-10-01T15:00:00Z")) == nil,
                      "an old reading drops the session it can no longer speak for, and a week-old file is ignored")
