@@ -7,7 +7,7 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Summary
-The window switcher offers column limits and clearer app filtering. The screenshot editor adds Spotlight, canvas expansion and pasted image layers, and screenshots copy text. Recordings export longer GIFs and isolate window audio, and mixer sliders follow perceived loudness. Dynamic Island opens with a keyboard shortcut, starts its clipboard page on the last copy and improves lyrics, companion playback and keyboard focus. The scratchpad reads task lists, App Updates can leave any app out, and windows moved with the modifier drag snap to screen edges. AI Agents supports OpenCode 2 and safer Claude renewal estimates. Command Bar opens and searches faster. Clipboard history leaves sensitive-text guessing off by default. Cleaning Mode keeps input taps suspended, alongside fixes for microphone volume, clipboard pastes, display brightness, recording, app updates, Homebrew installs, volume keys, mouse navigation, Dock instances and M4 Pro temperatures.
+After updating, What's New shows the changes for the features you use. The window switcher offers column limits and clearer app filtering. The screenshot editor adds Spotlight, canvas expansion and pasted image layers, and screenshots copy text. Recordings export longer GIFs and isolate window audio, and mixer sliders follow perceived loudness. Dynamic Island opens with a keyboard shortcut, starts its clipboard page on the last copy and improves lyrics, companion playback and keyboard focus. The scratchpad reads task lists, App Updates can leave any app out, and windows moved with the modifier drag snap to screen edges. AI Agents supports OpenCode 2 and safer Claude renewal estimates. Command Bar opens and searches faster. Clipboard history leaves sensitive-text guessing off by default. Cleaning Mode keeps input taps suspended, alongside fixes for microphone volume, clipboard pastes, display brightness, recording, app updates, Homebrew installs, volume keys, mouse navigation, Dock instances and M4 Pro temperatures.
 
 ### Added
 - Dynamic Island can show the keyboard input source when it changes. Command Bar's temporary layout switches stay quiet. Settings → Dynamic Island → Activity → Indicators.
@@ -18,6 +18,7 @@ The window switcher offers column limits and clearer app filtering. The screensh
 - The scratchpad's formatted reading shows Markdown task lists as checkboxes you can click, and Shift-Return continues a list.
 - App Updates can leave out any app, including one with no update showing, from Update exceptions. Settings → App Updates.
 - With Snap windows at screen edges and Move and resize by dragging on, a window moved with the modifier drag snaps like a title bar drag.
+- After an update, What's New lists the changes for the features you use, with new features first and the others a click away. The release notes shown before updating can be turned off. Settings → About → Updates.
 
 ### Changed
 - Clipboard history's sensitive-text filter now starts off, including after upgrading or restoring an older backup. It can be enabled in Settings → Clipboard. Copies marked as confidential and ignored apps remain excluded.
@@ -58,6 +59,7 @@ The window switcher offers column limits and clearer app filtering. The screensh
 - Audio controls no longer crash with microphones that report an invalid volume, such as the Insta360 Link 2C Pro.
 - The island scratchpad's shortcut opens and closes it every time and places the caret while a Vorssaint window is in front.
 - Clipboard, Scratchpad, Quick Launcher and Shelf shortcuts expand the island's capture controls while they show, instead of leaving the island to open by itself once the capture ends.
+- Port Manager shows ports and PIDs without thousands separators, such as 5173 instead of 5,173.
 
 ### Contributors
 Thanks to @2-Chengs, @AB-boi, @Acronyxxx, @Adridot, @ahmedabdullah-o, @beckhauser, @benjcrich, @capozz03, @carltonking, @chadfidev, @claude, @COMEBACKISREAL, @cprecioso, @DanyRodier, @eioz, @EugeneCarldotme, @gustavoramalho, @Hackmodford, @iancenry, @JeanBaeez, @JoeC-Dev, @juanra, @kit101, @LechTheMitch, @Likheet, @luantedesco, @ManuLorenzzo, @mohammadhprp, @morhaf-ko, @Narangor, @nateships, @ncesar, @oecer, @oskarsss, @PratikPawar1401, @RoccoRakete, @unfilet, @voljumet, @Werkezeugs, @ywu73 and @zhanghk2001.
