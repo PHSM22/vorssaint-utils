@@ -172,7 +172,9 @@ enum AgentClaudeAppUsage {
     /// and a reset the plan grants mid-week empties it without moving that
     /// schedule, so a drop only sets it when another drop whole weeks away
     /// confirms it, and then only within what both allow. With no confirmed
-    /// drop the last one stands.
+    /// drop the last one stands, and so it does once the readings see one of
+    /// the schedule's renewals go by without a drop, as when a plan change
+    /// moves it.
     private static func renewal(_ history: [Sample], key: String, length: TimeInterval, after reading: Date) -> Date? {
         let drops = history.indices.dropFirst().compactMap { index -> Drop? in
             guard let before = history[index - 1].used[key], let after = history[index].used[key],
@@ -188,11 +190,33 @@ enum AgentClaudeAppUsage {
             guard let newest = spans.last else { continue }
             // Partners that disagree on where the renewal lies leave the newest to speak.
             let agreed = spans.reduce(Optional(drops[index])) { $0?.overlap($1) }
-            moment = (agreed ?? newest).moment
+            let confirmed = (agreed ?? newest).moment
+            if !missed(confirmed, history: history, drops: drops, key: key, length: length, until: reading) {
+                moment = confirmed
+            }
             break
         }
         while moment <= reading { moment.addTimeInterval(length) }
         return moment
+    }
+
+    /// Whether a renewal the schedule from `moment` places went by in plain
+    /// sight: the week was spent enough for a renewal to show, readings within
+    /// the hour on both sides of it show no drop, and no drop lies within that
+    /// hour either way. A drop read up to an hour late or off keeps the
+    /// schedule once it shows; until then the last drop stands.
+    private static func missed(_ moment: Date, history: [Sample], drops: [Drop], key: String,
+                               length: TimeInterval, until reading: Date) -> Bool {
+        var next = moment.addingTimeInterval(length)
+        while next <= reading {
+            let start = next.addingTimeInterval(-3_600), end = next.addingTimeInterval(3_600)
+            if let before = history.last(where: { $0.date >= start && $0.date < next && $0.used[key] != nil })?.used[key],
+               let after = history.first(where: { $0.date > next && $0.date <= end && $0.used[key] != nil })?.used[key],
+               before >= 10, after + 1 >= before,
+               !drops.contains(where: { $0.latest >= start && $0.earliest <= end }) { return true }
+            next.addTimeInterval(length)
+        }
+        return false
     }
 
     /// Where `drop` lies if `other`, whole weeks away, confirms it: the span
