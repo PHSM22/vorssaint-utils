@@ -120,6 +120,7 @@ final class AgentUsageService: ObservableObject {
     private var readerClaudeRecordScopes: [String: String] = [:]
     private var readerClaudeFilter: String?
     private var claudeProfileModified: Date?
+    private var additionalClaudePlans: [String: (modified: Date?, plan: AgentPlan?)] = [:]
     private var claudeAppModified: Date?
     private var claudeAppSamples: [AgentClaudeAppUsage.Sample] = []
     private var claudeAccountLimits: AgentLimits?
@@ -146,8 +147,11 @@ final class AgentUsageService: ObservableObject {
 
     func syncWithPreferences() {
         CodexProfileLimitsService.shared.synchronize()
-        ClaudeProfileLimitsService.shared.synchronize()
-        guard NotchAgentSupport.isEnabled() else { stop(); return }
+        guard NotchAgentSupport.isEnabled() else {
+            ClaudeProfileLimitsService.shared.synchronize()
+            stop()
+            return
+        }
         let wanted = NotchAgentSupport.providers()
         let accounts = ClaudeMonitoredAccount.configured()
         let profile = accounts[0].profile
@@ -161,6 +165,7 @@ final class AgentUsageService: ObservableObject {
         }
         if claudeProfile != profile { claudeProfile = profile }
         if claudeAccounts != accounts { claudeAccounts = accounts }
+        ClaudeProfileLimitsService.shared.synchronize()
         if let selected = claudeAccountFilter, accounts.count <= 1 || !accounts.contains(where: { $0.id == selected }) { claudeAccountFilter = nil }
         pageVisible = showingPage
         if !running {
@@ -204,6 +209,20 @@ final class AgentUsageService: ObservableObject {
         startTimer()
         queue.async { [self] in
             guard readerSession >= 0 else { return }
+            readerClaudeScopes = ClaudeMonitoredAccount.logScopes(readerClaudeAccounts, home: home)
+            let updatedRecordScopes = ClaudeMonitoredAccount.recordScopes(readerClaudeAccounts, home: home)
+            // Keep namespaces already assigned to retained roots so cumulative
+            // updates keep deduplicating, and give newly discovered roots in a
+            // group that group's existing namespace.
+            var preservedByGroup: [String: String] = [:]
+            for (root, group) in updatedRecordScopes.sorted(by: { $0.key < $1.key }) {
+                if preservedByGroup[group] == nil, let existing = readerClaudeRecordScopes[root] {
+                    preservedByGroup[group] = existing
+                }
+            }
+            readerClaudeRecordScopes = Dictionary(uniqueKeysWithValues: updatedRecordScopes.map { root, group in
+                (root, readerClaudeRecordScopes[root] ?? preservedByGroup[group] ?? group)
+            })
             watch(AgentLogRoot.all(home: home, claudeProfile: readerClaudeProfile,
                 additionalClaudeProfiles: readerClaudeAccounts.dropFirst().map(\.profile)).filter { enabled.contains($0.provider) })
             filesChanged([], rescan: true)
@@ -262,6 +281,7 @@ final class AgentUsageService: ObservableObject {
             claudeOrganization = nil
             claudeIdentity = nil
             claudeProfileModified = nil
+            additionalClaudePlans.removeAll()
             claudeAppModified = nil
             claudeAppSamples = []
             claudeAccountLimits = nil
@@ -291,6 +311,7 @@ final class AgentUsageService: ObservableObject {
         queue.async { [self] in
             guard readerSession >= 0 else { return }
             readClaudePlan()
+            readAdditionalClaudePlans()
             readClaudeApp(now: Date())
             checkLimits()
             publish()
@@ -330,6 +351,7 @@ final class AgentUsageService: ObservableObject {
             readerClaudeAccounts = claudeAccounts
             readerClaudeScopes = ClaudeMonitoredAccount.logScopes(claudeAccounts, home: home)
             readerClaudeRecordScopes = ClaudeMonitoredAccount.recordScopes(claudeAccounts, home: home)
+            additionalClaudePlans.removeAll()
             store = AgentUsageStore()
             cursors.removeAll()
             // Prices first, so the first read is already priced.
@@ -358,6 +380,7 @@ final class AgentUsageService: ObservableObject {
             closeEndedTurns(atLaunch: true)
             // The account Claude Code uses picks the Claude app's readings.
             readClaudePlan()
+            readAdditionalClaudePlans()
             readClaudeApp(now: now)
             store.reportsTransitions = true
             previousLimits = store.limits
@@ -602,6 +625,7 @@ final class AgentUsageService: ObservableObject {
         // Saved tool output and lines with nothing to keep do not change the
         // summary or require a display update.
         guard changed else { return }
+        closeEndedTurns()
         checkLimits()
         schedulePublish()
     }
@@ -646,6 +670,7 @@ final class AgentUsageService: ObservableObject {
                 lastRootCheck = now
             }
             readClaudePlan()
+            readAdditionalClaudePlans()
             readClaudeApp(now: now)
             checkLimits()
             reportRenewals(now: now)
@@ -664,6 +689,7 @@ final class AgentUsageService: ObservableObject {
         let limits: [AgentProvider: AgentLimits]
         let codexPlan: String?
         let claudePlan: AgentPlan?
+        let additionalClaudePlans: [String: AgentPlan]
         let claudeOrganization: String?
         let claudeIdentity: ClaudeAccountProfile.Identity?
         let claudeApp: [AgentClaudeAppUsage.Sample]
@@ -672,7 +698,8 @@ final class AgentUsageService: ObservableObject {
     /// Runs on `queue`.
     private var inputs: Inputs {
         Inputs(records: store.records.count, turns: store.turns, limits: store.limits, codexPlan: store.codexPlan,
-               claudePlan: claudePlan, claudeOrganization: claudeOrganization, claudeIdentity: claudeIdentity,
+               claudePlan: claudePlan, additionalClaudePlans: additionalClaudePlans.compactMapValues(\.plan),
+               claudeOrganization: claudeOrganization, claudeIdentity: claudeIdentity,
                claudeApp: claudeAppSamples)
     }
 
@@ -683,11 +710,13 @@ final class AgentUsageService: ObservableObject {
         var plans: [AgentProvider: AgentPlan] = [:]
         var claudePlans: [String: AgentPlan] = [:]
         if enabled.contains(.claude) {
-            for account in readerClaudeAccounts {
-                claudePlans[account.id] = account.id == readerClaudeAccounts.first?.id
-                    ? claudePlan : account.profile.read(home: home).plan
+            let accounts = readerClaudeAccounts.isEmpty
+                ? [ClaudeMonitoredAccount(directory: readerClaudeProfile.directory)] : readerClaudeAccounts
+            for account in accounts {
+                claudePlans[account.id] = account.id == accounts.first?.id
+                    ? claudePlan : additionalClaudePlans[account.id]?.plan
             }
-            plans[.claude] = AgentPlans.combined(readerClaudeAccounts.map { claudePlans[$0.id] })
+            plans[.claude] = AgentPlans.combined(accounts.map { claudePlans[$0.id] })
         }
         if let codex = AgentPlans.codex(planType: store.codexPlan) { plans[.codex] = codex }
         var next = store.snapshot(plans: plans, providers: enabled, now: Date())
@@ -811,6 +840,27 @@ final class AgentUsageService: ObservableObject {
         claudeIdentity = identity
         claudeOrganization = identity.organization
         claudePlan = reading.plan
+    }
+
+    /// Caches each additional Claude account's plan by profile modification date
+    /// so `publish()` reads no `.claude.json` files from disk. Runs on `queue`.
+    private func readAdditionalClaudePlans() {
+        guard enabled.contains(.claude) else { return }
+        var kept: [String: (modified: Date?, plan: AgentPlan?)] = [:]
+        for account in readerClaudeAccounts.dropFirst() {
+            let profile = account.profile
+            let url = profile.profileURL(home: home)
+            let readable = profile.isAvailable(home: home) && FileManager.default.isReadableFile(atPath: url.path)
+            let modified = readable
+                ? (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
+                : nil
+            if readable, let modified, let cached = additionalClaudePlans[account.id], cached.modified == modified {
+                kept[account.id] = cached
+                continue
+            }
+            kept[account.id] = (modified: modified, plan: readable ? profile.read(home: home).plan : nil)
+        }
+        additionalClaudePlans = kept
     }
 
     /// Reads the limits the Claude app saved when the file changes, and

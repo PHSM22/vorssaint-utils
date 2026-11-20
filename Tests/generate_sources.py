@@ -2802,8 +2802,9 @@ def main():
                     .replace("private func", "func", 1)
                     .replace("func read(", "@discardableResult func read(", 1)
                     .replace("func closeEndedTurns(", "@discardableResult func closeEndedTurns(", 1)
-                    for prefix in ["    private func start(", "    private func read(", "    private func filesChanged(",
-                                   "    private func closeEndedTurns("])
+                    for prefix in ["    private func start(", "    private func resume(", "    private func read(",
+                                   "    private func filesChanged(", "    private func closeEndedTurns(",
+                                   "    private func readAdditionalClaudePlans("])
           + "}\n}\n")
 
     write("AgentClaudeServerService.swift", "import Foundation\n"

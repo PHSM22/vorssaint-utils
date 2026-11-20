@@ -17,6 +17,18 @@ struct ClaudeMonitoredAccount: Codable, Equatable, Identifiable {
         return label.isEmpty ? profile.name(defaultName: defaultName) : label
     }
 
+    /// The signed-in email identifies an unnamed default account directly, and
+    /// follows a custom or folder-derived name; the label stands in until read.
+    func displayName(defaultName: String, email: String?) -> String {
+        let base = label(defaultName: defaultName)
+        guard let email else { return base }
+        if base.caseInsensitiveCompare(email) == .orderedSame
+            || (profile.isDefault && name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) {
+            return email
+        }
+        return base + " · " + email
+    }
+
     enum FolderIssue: Equatable { case duplicate, invalid }
 
     /// Discovery and validation may touch slow home directories or volumes.
@@ -50,7 +62,8 @@ struct ClaudeMonitoredAccount: Codable, Equatable, Identifiable {
                !FileManager.default.fileExists(atPath: profile.profileURL(home: home).path) {
                 profile = ClaudeAccountProfile()
             }
-            guard profile.isAvailable(home: home), updated.count < maximum else { issue = .invalid; continue }
+            guard profile.isAvailable(home: home) else { issue = .invalid; continue }
+            guard updated.count < maximum else { continue }
             paths.insert(path)
             updated.append(Self(directory: profile.directory))
         }

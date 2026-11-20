@@ -102,12 +102,11 @@ struct NotchAgentsView: View {
 
     private var accountMenu: some View {
         let strings = FeatureStrings.claudeAccount(l10n.language)
-        let title = usage.claudeAccounts.first { $0.id == usage.claudeAccountFilter }?
-            .label(defaultName: strings.defaultAccount) ?? strings.allAccounts
+        let title = usage.claudeAccounts.first { $0.id == usage.claudeAccountFilter }.map(claudeAccountName) ?? strings.allAccounts
         let options = [NotchMenuItem(title: strings.allAccounts, checked: usage.claudeAccountFilter == nil) {
             usage.claudeAccountFilter = nil
         }] + usage.claudeAccounts.map { account in
-            NotchMenuItem(title: account.label(defaultName: strings.defaultAccount), checked: usage.claudeAccountFilter == account.id) {
+            NotchMenuItem(title: claudeAccountName(account), checked: usage.claudeAccountFilter == account.id) {
                 usage.claudeAccountFilter = account.id
             }
         }
@@ -183,7 +182,7 @@ struct NotchAgentsView: View {
         if tile.provider == .claude, let id = tile.accountID,
            let account = usage.claudeAccounts.first(where: { $0.id == id }) {
             let strings = FeatureStrings.codexAccounts(l10n.language)
-            let name = account.label(defaultName: FeatureStrings.claudeAccount(l10n.language).defaultAccount)
+            let name = claudeAccountName(account)
             if id == usage.claudeProfile.id {
                 return NotchAgentAccount(name: name, limits: usage.snapshot.limits[.claude],
                     plan: usage.snapshot.claudePlans[id]?.name, checking: usage.claudeAccountChecking,
@@ -192,7 +191,7 @@ struct NotchAgentsView: View {
             }
             let state = claudeLimits.states.first { $0.id == id }
             return NotchAgentAccount(name: name, limits: AgentClaudeServer.current(state?.limits, now: now),
-                plan: state?.plan?.name, checking: state?.checking ?? false,
+                plan: state?.plan?.name ?? usage.snapshot.claudePlans[id]?.name, checking: state?.checking ?? false,
                 failure: state?.failure.map(text.claudeCode), refreshHint: strings.refreshHint,
                 checkLabel: strings.check) { claudeLimits.refresh(id: id, force: true) }
         }
@@ -212,10 +211,17 @@ struct NotchAgentsView: View {
                                  checkLabel: strings.check) { accounts.refresh(id: id, force: true) }
     }
 
+    private func claudeAccountName(_ account: ClaudeMonitoredAccount) -> String {
+        let email = account.id == usage.claudeProfile.id ? usage.claudeAccountIdentity?.email
+            : claudeLimits.states.first { $0.id == account.id }?.identity?.email
+        return account.displayName(defaultName: FeatureStrings.claudeAccount(l10n.language).defaultAccount, email: email)
+    }
+
     private var claudeAccountName: String {
-        let name = usage.claudeProfile.name(defaultName: FeatureStrings.claudeAccount(l10n.language).defaultAccount)
-        guard let email = usage.claudeAccountIdentity?.email else { return name }
-        return usage.claudeProfile.isDefault ? email : name + " · " + email
+        if let primary = usage.claudeAccounts.first { return claudeAccountName(primary) }
+        return ClaudeMonitoredAccount(directory: usage.claudeProfile.directory)
+            .displayName(defaultName: FeatureStrings.claudeAccount(l10n.language).defaultAccount,
+                         email: usage.claudeAccountIdentity?.email)
     }
 }
 

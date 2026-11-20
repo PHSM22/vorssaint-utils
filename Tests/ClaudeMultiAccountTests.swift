@@ -100,6 +100,8 @@ enum ClaudeMultiAccountTests {
             try sharedHistory(suite, home: home, accounts: accounts)
             try nestedHistory(suite, home: home, accounts: accounts)
             try archiveKeys(suite, home: home)
+            try cachedPlans(suite, home: home)
+            try immediateProfileMetadata(suite, home: home)
             lifecycle(suite, accounts: accounts)
         } catch { suite.expect(false, "multiple Claude fixtures run: \(error)") }
     }
@@ -151,6 +153,16 @@ enum ClaudeMultiAccountTests {
         let mixed = ClaudeMonitoredAccount.adding([defaultFolder, accounts[1].profile, invalid], to: [accounts[0]], home: home)
         suite.expect(mixed.accounts.map(\.directory) == accounts.map(\.directory) && mixed.issue == .invalid,
                      "mixed folder selections add valid accounts and retain feedback about unusable folders")
+        var extras: [ClaudeAccountProfile] = []
+        for index in 1...ClaudeMonitoredAccount.maximum {
+            let folder = home.appending(path: ".claude-cap-\(index)", directoryHint: .isDirectory)
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+            try Data("{}".utf8).write(to: folder.appending(path: ".claude.json"))
+            extras.append(ClaudeAccountProfile(directory: folder.path))
+        }
+        let capped = ClaudeMonitoredAccount.adding(extras, to: [accounts[0]], home: home)
+        suite.expect(capped.accounts.count == ClaudeMonitoredAccount.maximum && capped.issue == nil,
+                     "valid folders beyond the eight-account limit stop at the cap without reporting an invalid folder")
     }
 
     private static func backgroundFolders(_ suite: TestSuite, home: URL, accounts: [ClaudeMonitoredAccount]) {
@@ -270,6 +282,27 @@ enum ClaudeMultiAccountTests {
         suite.expect(restored.snapshot(plans: [:], providers: [.claude], now: now)
                         .live.first?.claudeProfile == scopes[1],
                      "live sessions restored from the usage archive regain their account from a running login registry")
+        // File watcher updates attribute a newly started Claude turn right away
+        // instead of waiting for the fast poller.
+        let personalSessions = accounts[0].profile.configurationURL(home: home).appending(path: "sessions")
+        try session("watched-live", account: accounts[0], home: home)
+        let watcher = AgentUsageReadTests.Host()
+        watcher.home = home
+        watcher.enabled = [.claude]
+        watcher.readerClaudeProfile = accounts[0].profile
+        watcher.readerClaudeAccounts = accounts
+        watcher.readerClaudeScopes = ClaudeMonitoredAccount.logScopes(accounts, home: home)
+        watcher.readerClaudeRecordScopes = ClaudeMonitoredAccount.recordScopes(accounts, home: home)
+        let personalRoot = AgentLogRoot.canonical(accounts[0].profile.configurationURL(home: home).appending(path: "projects"))
+        watcher.watchedRoots = [AgentLogRoot(provider: .claude, url: personalRoot)]
+        let liveFile = personalRoot.appending(path: "project/watched-live.jsonl")
+        let began = #"{"type":"user","timestamp":\#(now.timeIntervalSince1970),"sessionId":"watched-live","message":{"content":"hello"}}"#
+        try Data((began + "\n").utf8).write(to: liveFile)
+        watcher.filesChanged([liveFile.path], rescan: false)
+        suite.expect(watcher.store.live.first?.claudeProfile == scopes[0],
+                     "file-watcher updates attribute a new Claude live turn immediately")
+        try? FileManager.default.removeItem(at: liveFile)
+        try? FileManager.default.removeItem(at: personalSessions)
     }
 
     private static func spendPlans(_ suite: TestSuite, home: URL, accounts: [ClaudeMonitoredAccount]) {
@@ -567,6 +600,178 @@ enum ClaudeMultiAccountTests {
                             && !text.duplicateFolder.isEmpty && text.duplicateFolder != text.invalidFolder,
                          "multiple Claude accounts have labels and help in \(language)")
         }
+        let unnamedDefault = ClaudeMonitoredAccount(directory: "")
+        let namedDefault = ClaudeMonitoredAccount(directory: "", name: "Personal")
+        let unnamedWork = ClaudeMonitoredAccount(directory: accounts[1].directory)
+        let namedWork = ClaudeMonitoredAccount(directory: accounts[1].directory, name: "Work")
+        let emailNamed = ClaudeMonitoredAccount(directory: accounts[1].directory, name: "work@example.invalid")
+        suite.expect(unnamedDefault.displayName(defaultName: "Default account", email: "me@example.invalid") == "me@example.invalid"
+                        && unnamedDefault.displayName(defaultName: "Default account", email: nil) == "Default account"
+                        && namedDefault.displayName(defaultName: "Default account", email: "me@example.invalid") == "Personal · me@example.invalid"
+                        && unnamedWork.displayName(defaultName: "Default account", email: "work@example.invalid") == "work · work@example.invalid"
+                        && namedWork.displayName(defaultName: "Default account", email: "work@example.invalid") == "Work · work@example.invalid"
+                        && emailNamed.displayName(defaultName: "Default account", email: "work@example.invalid") == "work@example.invalid",
+                     "account display names include the signed-in email without repeating an email label")
+    }
+
+    private static func cachedPlans(_ suite: TestSuite, home: URL) throws {
+        let manager = FileManager.default
+        let isolated = home.appending(path: "cached-plans", directoryHint: .isDirectory)
+        let secondaryFolder = isolated.appending(path: ".claude-team", directoryHint: .isDirectory)
+        try manager.createDirectory(at: secondaryFolder, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        let profileURL = secondaryFolder.appending(path: ".claude.json")
+        try JSONSerialization.data(withJSONObject: [
+            "oauthAccount": ["accountUuid": "team", "organizationType": "claude_pro"]
+        ]).write(to: profileURL)
+        let accounts = [ClaudeMonitoredAccount(directory: ""), ClaudeMonitoredAccount(directory: secondaryFolder.path)]
+        let host = AgentUsageReadTests.Host()
+        host.home = isolated
+        host.enabled = [.claude]
+        host.readerClaudeAccounts = accounts
+        host.readAdditionalClaudePlans()
+        suite.expect(host.additionalClaudePlans[accounts[1].id]?.plan?.name == "Pro",
+                     "additional Claude account plans are cached from profile metadata")
+        let updated = Date().addingTimeInterval(5)
+        try JSONSerialization.data(withJSONObject: [
+            "oauthAccount": ["accountUuid": "team", "organizationType": "claude_max"]
+        ]).write(to: profileURL)
+        try manager.setAttributes([.modificationDate: updated], ofItemAtPath: profileURL.path)
+        host.readAdditionalClaudePlans()
+        suite.expect(host.additionalClaudePlans[accounts[1].id]?.plan?.name == "Max",
+                     "modifying a secondary profile's .claude.json refreshes its cached plan")
+        try manager.removeItem(at: profileURL)
+        host.readAdditionalClaudePlans()
+        suite.expect(host.additionalClaudePlans[accounts[1].id]?.plan == nil,
+                     "removing a secondary profile clears its cached plan")
+        // Retargeting a profile's projects symlink while paused must refresh
+        // account scopes and record scopes on resume().
+        try JSONSerialization.data(withJSONObject: [
+            "oauthAccount": ["accountUuid": "team"]
+        ]).write(to: profileURL)
+        let targetA = isolated.appending(path: "history-a/project", directoryHint: .isDirectory)
+        let targetB = isolated.appending(path: "history-b/project", directoryHint: .isDirectory)
+        try manager.createDirectory(at: targetA, withIntermediateDirectories: true)
+        try manager.createDirectory(at: targetB, withIntermediateDirectories: true)
+        let projectsLink = secondaryFolder.appending(path: "projects")
+        try manager.createSymbolicLink(at: projectsLink, withDestinationURL: targetA.deletingLastPathComponent())
+        let resumeHost = AgentUsageReadTests.Host()
+        resumeHost.home = isolated
+        resumeHost.start(session: 7, providers: [.claude], cancellation: AgentUsageReadTests.Cancellation(),
+                         claudeProfile: accounts[0].profile, claudeAccounts: accounts)
+        let beforeRoot = AgentLogRoot.canonical(targetA.deletingLastPathComponent()).path + "/"
+        suite.expect(resumeHost.readerClaudeScopes[beforeRoot] != nil,
+                     "initial start maps the symlinked projects root")
+        try manager.removeItem(at: projectsLink)
+        try manager.createSymbolicLink(at: projectsLink, withDestinationURL: targetB.deletingLastPathComponent())
+        let now = Date()
+        let line = #"{"type":"assistant","timestamp":\#(now.timeIntervalSince1970),"sessionId":"resumed","requestId":"r","message":{"id":"m","model":"claude-opus-5-5","stop_reason":"end_turn","usage":{"input_tokens":5,"output_tokens":2}}}"#
+        try Data((line + "\n").utf8).write(to: targetB.appending(path: "resumed.jsonl"))
+        resumeHost.paused = true
+        resumeHost.resume()
+        let afterRoot = AgentLogRoot.canonical(targetB.deletingLastPathComponent()).path + "/"
+        let resumedTokens = resumeHost.store.claudeSnapshot(
+            roots: accounts[1].logURLs(home: isolated, scopes: resumeHost.readerClaudeScopes), now: now).usage(.today).total.tokens.total
+        suite.expect(resumeHost.readerClaudeScopes[afterRoot] != nil
+                        && resumeHost.readerClaudeRecordScopes[afterRoot] != nil
+                        && resumedTokens == 7,
+                     "resuming after a projects symlink retarget rebuilds account scopes and attributes newly discovered logs")
+    }
+
+    private static func immediateProfileMetadata(_ suite: TestSuite, home: URL) throws {
+        let manager = FileManager.default
+        let isolated = home.appending(path: "profile-metadata", directoryHint: .isDirectory)
+        let secondaryFolder = isolated.appending(path: ".claude-email", directoryHint: .isDirectory)
+        try manager.createDirectory(at: secondaryFolder, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        let profileURL = secondaryFolder.appending(path: ".claude.json")
+        try JSONSerialization.data(withJSONObject: [
+            "oauthAccount": ["accountUuid": "email-acct", "emailAddress": "work@example.invalid", "organizationType": "claude_max"]
+        ]).write(to: profileURL)
+        let domain = "com.vorssaint.tests.multiple-claude.metadata.\(UUID())"
+        let defaults = UserDefaults(suiteName: domain)!
+        defer { defaults.removePersistentDomain(forName: domain) }
+        for (key, value) in Defaults.registeredDefaults where key.hasPrefix("notch") { defaults.set(value, forKey: key) }
+        for feature in AppFeature.allCases { defaults.set(true, forKey: feature.availabilityKey) }
+        defaults.set(true, forKey: DefaultsKey.notchEnabled)
+        defaults.set(true, forKey: DefaultsKey.notchAgentsEnabled)
+        let accounts = [ClaudeMonitoredAccount(directory: ""), ClaudeMonitoredAccount(directory: secondaryFolder.path)]
+        defaults.set(ClaudeMonitoredAccount.encode(accounts), forKey: DefaultsKey.notchAgentsClaudeAccounts)
+        let lock = NSLock()
+        var cliCalls = 0
+        let service = ClaudeProfileLimitsService(defaults: defaults, home: isolated) { _, _ in
+            lock.withLock { cliCalls += 1 }
+            let identity = ClaudeAccountProfile.Identity(account: "email-acct", email: "work@example.invalid", organization: nil)
+            let limits = AgentLimits(provider: .claude, windows: [.init(id: "claude.fh", kind: .session,
+                minutes: 300, scope: nil, usedPercent: 18, resetsAt: Date().addingTimeInterval(300))], observedAt: Date(), source: .account)
+            return .init(metadata: .init(identity: identity, plan: AgentPlan(name: "Max", monthlyPrice: 100)),
+                         result: .success(.init(limits: limits, identity: identity)))
+        }
+        defer { service.pause() }
+        // While Claude is turned off, synchronize() does not read additional profiles.
+        defaults.set(false, forKey: DefaultsKey.notchAgentsClaude)
+        service.synchronize()
+        _ = RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.05))
+        suite.expect(service.states.first?.identity == nil && service.states.first?.plan == nil,
+                     "disabled Claude does not read additional profile metadata during synchronize")
+        defaults.set(true, forKey: DefaultsKey.notchAgentsClaude)
+        service.synchronize()
+        wait { service.states.first?.identity?.email != nil }
+        suite.expect(service.states.first?.identity?.email == "work@example.invalid"
+                        && service.states.first?.plan?.name == "Max"
+                        && lock.withLock { cliCalls } == 0,
+                     "listing an additional Claude account loads its signed-in email and plan before any CLI limits check runs")
+        // After a CLI limits check completes, forced metadata refresh (e.g.
+        // reopening Settings after switching logins) updates email and drops
+        // the previous login's allowance.
+        service.refresh(force: true)
+        wait { service.states.first?.limits != nil }
+        try JSONSerialization.data(withJSONObject: [
+            "oauthAccount": ["accountUuid": "new-acct", "emailAddress": "switched@example.invalid", "organizationType": "claude_pro"]
+        ]).write(to: profileURL)
+        service.readProfiles(force: true)
+        wait { service.states.first?.identity?.email == "switched@example.invalid" }
+        suite.expect(service.states.first?.identity?.email == "switched@example.invalid"
+                        && service.states.first?.plan?.name == "Pro"
+                        && service.states.first?.limits == nil
+                        && service.states.first?.failure == nil
+                        && service.states.first?.failures == 0
+                        && service.states.first?.attempted == nil,
+                     "forced metadata refresh after a completed limits check updates the email and clears stale limits and retry state")
+        // Even with the Limits card hidden, reopening the AI page refreshes
+        // secondary profile metadata after a login switch.
+        defaults.set(NotchAgentCard.limits.rawValue, forKey: DefaultsKey.notchAgentsHiddenCards)
+        try JSONSerialization.data(withJSONObject: [
+            "oauthAccount": ["accountUuid": "hidden-acct", "emailAddress": "hidden@example.invalid", "organizationType": "claude_max"]
+        ]).write(to: profileURL)
+        service.pageDidAppear()
+        wait { service.states.first?.identity?.email == "hidden@example.invalid" }
+        suite.expect(service.states.first?.identity?.email == "hidden@example.invalid"
+                        && service.states.first?.plan?.name == "Max",
+                     "reopening the AI page with the Limits card hidden refreshes secondary profile metadata")
+        // A metadata read invalidated by pause() before completion retries on
+        // the next synchronize() instead of staying permanently skipped.
+        let retried = ClaudeProfileLimitsService(defaults: defaults, home: isolated) { _, _ in
+            .init(metadata: .init(), result: .failure(.missing))
+        }
+        defer { retried.pause() }
+        retried.synchronize()
+        retried.pause()
+        _ = RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.05))
+        suite.expect(retried.states.first?.identity == nil,
+                     "pausing discards an in-flight profile metadata read")
+        retried.synchronize()
+        wait { retried.states.first?.identity?.email == "hidden@example.invalid" }
+        suite.expect(retried.states.first?.identity?.email == "hidden@example.invalid",
+                     "an invalidated profile metadata read retries on the next synchronize")
+        // Switching logins while paused refreshes metadata on resume's synchronize().
+        retried.pause()
+        try JSONSerialization.data(withJSONObject: [
+            "oauthAccount": ["accountUuid": "resumed-acct", "emailAddress": "resumed@example.invalid", "organizationType": "claude_pro"]
+        ]).write(to: profileURL)
+        retried.synchronize()
+        wait { retried.states.first?.identity?.email == "resumed@example.invalid" }
+        suite.expect(retried.states.first?.identity?.email == "resumed@example.invalid"
+                        && retried.states.first?.plan?.name == "Pro",
+                     "switching a secondary login while paused refreshes metadata on the next synchronize")
     }
 
     private static func wait(until condition: () -> Bool) {
