@@ -45,21 +45,39 @@ final class ClaudeProfileLimitsService: ObservableObject {
     @Published private(set) var states: [ClaudeProfileLimitsState] = []
     private(set) var timer: Timer?
     private let defaults: UserDefaults
+    private let home: URL
     private let reader: Reader
+    private final class MetadataToken {
+        private let lock = NSLock()
+        private var value = 0
+        var current: Int { lock.withLock { value } }
+        func advance() { lock.withLock { value += 1 } }
+    }
     private let queue = DispatchQueue(label: "com.vorssaint.claude-profile-limits", qos: .utility)
+    private let profileQueue = DispatchQueue(label: "com.vorssaint.claude-profile-metadata", qos: .utility)
+    private var profiled: Set<String> = []
+    private let profileToken = MetadataToken()
+    private var profileRequest: [String: Int] = [:]
+    private var metadataVersion: [String: Int] = [:]
     private var running: (id: String, request: AgentClaudeServer.Request)?
     private var waiting: [(id: String, asked: Bool)] = []
     private var visible = false
     private var online = true
 
-    init(defaults: UserDefaults = .standard, reader: @escaping Reader = ClaudeProfileLimitsService.read) {
+    init(defaults: UserDefaults = .standard,
+         home: URL = FileManager.default.homeDirectoryForCurrentUser,
+         reader: @escaping Reader = ClaudeProfileLimitsService.read) {
         self.defaults = defaults
+        self.home = home
         self.reader = reader
     }
 
-    var isEnabled: Bool {
+    var readsMetadata: Bool {
         NotchAgentSupport.isEnabled(in: defaults) && NotchAgentSupport.providers(in: defaults).contains(.claude)
-            && !NotchAgentSupport.hiddenCards(in: defaults).contains(.limits)
+    }
+
+    var isEnabled: Bool {
+        readsMetadata && !NotchAgentSupport.hiddenCards(in: defaults).contains(.limits)
     }
 
     func synchronize() {
@@ -71,6 +89,10 @@ final class ClaudeProfileLimitsService: ObservableObject {
                 state.account = account
                 return state
             }
+            let ids = Set(states.map(\.id))
+            profiled.formIntersection(ids)
+            profileRequest = profileRequest.filter { ids.contains($0.key) }
+            metadataVersion = metadataVersion.filter { ids.contains($0.key) }
             waiting.removeAll { item in !states.contains { $0.id == item.id } }
             if let running, !states.contains(where: { $0.id == running.id }) {
                 running.request.cancel()
@@ -78,13 +100,68 @@ final class ClaudeProfileLimitsService: ObservableObject {
                 startNext()
             }
         }
+        if readsMetadata {
+            readProfiles(force: visible)
+        } else {
+            profileToken.advance()
+            profiled.removeAll()
+        }
         syncTimer()
         refresh()
+    }
+
+    /// Reads profile metadata for listed accounts on a separate queue so
+    /// Settings, cards and the account menu show their email and plan before
+    /// a CLI limits check runs, and refresh when a profile's login changes.
+    func readProfiles(force: Bool = false) {
+        guard force ? NotchAgentSupport.providers(in: defaults).contains(.claude) : readsMetadata else { return }
+        let pending = states.filter { state in
+            !state.checking && (force || !profiled.contains(state.id))
+        }.map(\.account)
+        guard !pending.isEmpty else { return }
+        let token = profileToken
+        let generation = token.current
+        var requests: [String: Int] = [:]
+        var versions: [String: Int] = [:]
+        for account in pending {
+            profileRequest[account.id, default: 0] += 1
+            requests[account.id] = profileRequest[account.id]
+            versions[account.id] = metadataVersion[account.id, default: 0]
+        }
+        let home = self.home
+        profileQueue.async { [weak self] in
+            var readings: [(String, ClaudeAccountProfile.Reading)] = []
+            for account in pending {
+                guard token.current == generation else { return }
+                readings.append((account.id, account.profile.read(home: home)))
+            }
+            DispatchQueue.main.async {
+                guard let self, self.profileToken.current == generation else { return }
+                for (id, reading) in readings {
+                    guard let index = self.states.firstIndex(where: { $0.id == id }),
+                          !self.states[index].checking,
+                          self.profileRequest[id] == requests[id],
+                          self.metadataVersion[id, default: 0] == versions[id] else { continue }
+                    self.profiled.insert(id)
+                    let identityChanged = self.states[index].identity != reading.identity
+                    self.states[index].identity = reading.identity
+                    self.states[index].plan = reading.plan
+                    if identityChanged {
+                        self.states[index].limits = nil
+                        self.states[index].failure = nil
+                        self.states[index].failures = 0
+                        self.states[index].attempted = nil
+                        self.refresh(id: id)
+                    }
+                }
+            }
+        }
     }
 
     func pageDidAppear(preview: Bool = false) {
         if !preview { visible = true }
         synchronize()
+        if preview && readsMetadata { readProfiles(force: true) }
     }
 
     func pageDidDisappear() {
@@ -97,14 +174,20 @@ final class ClaudeProfileLimitsService: ObservableObject {
 
     func pause() {
         visible = false
+        profileToken.advance()
+        profiled.removeAll()
         cancelChecks()
         syncTimer()
     }
 
     func setOnline(_ value: Bool) {
         online = value
-        if !value { cancelChecks() }
-        else { for index in states.indices { states[index].failures = 0 } }
+        if !value {
+            cancelChecks()
+            if visible && readsMetadata { readProfiles(force: true) }
+        } else {
+            for index in states.indices { states[index].failures = 0 }
+        }
     }
 
     func refresh(id: String? = nil, force: Bool = false, now: Date = Date()) {
@@ -128,6 +211,7 @@ final class ClaudeProfileLimitsService: ObservableObject {
         guard let index = states.firstIndex(where: { $0.id == next.id }) else { return startNext() }
         let profile = states[index].account.profile
         states[index].attempted = Date()
+        metadataVersion[next.id, default: 0] += 1
         let request = AgentClaudeServer.Request()
         running = (next.id, request)
         let read = reader
@@ -136,7 +220,9 @@ final class ClaudeProfileLimitsService: ObservableObject {
             DispatchQueue.main.async {
                 guard let self, self.running?.request === request else { return }
                 self.running = nil
+                self.metadataVersion[next.id, default: 0] += 1
                 if let index = self.states.firstIndex(where: { $0.id == next.id }) {
+                    self.profiled.insert(next.id)
                     var state = self.states[index]
                     state.checking = false
                     if state.identity != check.metadata.identity { state.limits = nil }

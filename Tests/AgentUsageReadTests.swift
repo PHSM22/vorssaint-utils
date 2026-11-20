@@ -63,6 +63,7 @@ enum AgentUsageReadTests {
         static let horizon = TimeInterval(AgentUsageSnapshot.dayCount) * 86_400
         let queue = Queue()
         var home = FileManager.default.temporaryDirectory
+        var paused = false
         var readerSession = 1
         var watchedRoots: [AgentLogRoot] = []
         var readerCancellation: Cancellation? = Cancellation()
@@ -73,6 +74,7 @@ enum AgentUsageReadTests {
         var readerClaudeAccounts: [ClaudeMonitoredAccount] = []
         var readerClaudeScopes: [String: String] = [:]
         var readerClaudeRecordScopes: [String: String] = [:]
+        var additionalClaudePlans: [String: (modified: Date?, plan: AgentPlan?)] = [:]
         var previousLimits: [AgentProvider: AgentLimits] = [:]
         var budgetDay: Date?
         var snapshot = AgentUsageSnapshot()
